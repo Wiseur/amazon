@@ -1,130 +1,170 @@
-const int electromagnetPin1 = 8;  // Pin du premier électroaimant
-const int electromagnetPin2 = 9;  // Pin du deuxième électroaimant
-const String targetBarcode1 = "PE0275";  // Code-barres pour désactiver le premier électroaimant
-const String targetBarcode2 = "PE0513";  // Code-barres pour désactiver le deuxième électroaimant
-const String degradedModeBarcode = "14810";  // Code-barres pour mode dégradé
+#include <Wire.h>  
+#include <Adafruit_GFX.h>  
+#include <Adafruit_SSD1306.h>
 
-unsigned long lastDegradedTime = 0;  // Variable pour suivre le temps du mode dégradé
-const unsigned long degradedModeTimeout = 30000;  // Timeout du mode dégradé (30 secondes)
-bool electromagnetActive1 = true;  // Variable pour suivre l'état du premier électroaimant
-bool electromagnetActive2 = true;  // Variable pour suivre l'état du deuxième électroaimant
-bool degradedModeActive = false;  // Indicateur pour savoir si le mode dégradé est activé
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+const int electromagnetPin1 = 8;
+const int electromagnetPin2 = 9;
+const int ledPin1 = 2;  
+const int ledPin2 = 3;  
+
+const String targetBarcode1 = "PE0275";
+const String targetBarcode2 = "PE0513";
+const String degradedModeBarcode = "14810";
+
+unsigned long lastDegradedTime = 0;
+const unsigned long degradedModeTimeout = 30000;
+bool degradedModeActive = false;
+
+bool electromagnetActive1 = true;
+bool electromagnetActive2 = true;
+unsigned long unlockTime1 = 0;
+unsigned long unlockTime2 = 0;
+const unsigned long unlockDuration = 5000;  // Temps avant que l'électroaimant se referme (5 secondes)
 
 void setup() {
-  // Initialisation de la communication série avec l'ordinateur
-  Serial.begin(9600);  // Communication avec le moniteur série
+  Serial.begin(9600);
+  Serial1.begin(9600);
   
-  // Initialisation de la communication série avec le lecteur de code-barres
-  Serial1.begin(9600);  // Le taux de transmission dépend du lecteur de code-barres
-  
-  // Attendre que tout soit prêt
-  while (!Serial) {
-    ;  // Attendre que la connexion série soit prête
-  }
-  
-  // Initialisation des pins des électroaimants
   pinMode(electromagnetPin1, OUTPUT);
   pinMode(electromagnetPin2, OUTPUT);
-  
+  pinMode(ledPin1, OUTPUT);
+  pinMode(ledPin2, OUTPUT);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  
+    Serial.println(F("Échec de l'initialisation de l'écran OLED"));
+    while (true);
+  }
+  display.display();
+  delay(2000);  
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+
   Serial.println("Prêt à recevoir les données du lecteur de code-barres.");
+  updateLED();
 }
 
 void loop() {
-  // Vérifier si des données sont disponibles sur le port série du lecteur de code-barres (Serial1)
   if (Serial1.available() > 0) {
-    // Lire la donnée envoyée par le lecteur de code-barres
-    String barcodeData = Serial1.readString();  // Lire les données envoyées par le lecteur
+    String barcodeData = Serial1.readString();
+    barcodeData.trim();
     
-    // Nettoyer la chaîne (enlever les espaces et les retours à la ligne)
-    barcodeData.trim();  // Enlève les espaces et les caractères de contrôle comme \n, \r
-    
-    // Afficher les données lues sur le moniteur série pour débogage
     Serial.print("Code-barres scanné: ");
-    Serial.println(barcodeData);  // Affiche la donnée (le code du produit scanné)
-    
-    // Vérifier si le code-barres scanné est pour désactiver le premier électroaimant
+    Serial.println(barcodeData);
+
     if (barcodeData == targetBarcode1) {
-      // Si le code-barres "PE0275" est scanné, désactiver le premier électroaimant pendant 3 secondes
-      deactivateElectromagnet1();
-    }
-    
-    // Vérifier si le code-barres scanné est pour désactiver le deuxième électroaimant
-    else if (barcodeData == targetBarcode2) {
-      // Si le code-barres "PE0513" est scanné, désactiver le deuxième électroaimant pendant 3 secondes
-      deactivateElectromagnet2();
-    }
-    
-    // Vérifier si le code-barres scanné est pour activer ou désactiver le mode dégradé
-    else if (barcodeData == degradedModeBarcode) {
-      // Si le code-barres "14810" est scanné, activer/désactiver le mode dégradé
+      unlockElectromagnet1();
+      updateDisplay("Acces autorise.");
+    } else if (barcodeData == targetBarcode2) {
+      unlockElectromagnet2();
+      updateDisplay("Acces autorise.");
+    } else if (barcodeData == degradedModeBarcode) {
       toggleDegradedMode();
+      updateDisplay("Mode degrade active.");
+    } else {
+      updateDisplay("Code incorrect.\nAcces refuse.");
     }
   }
-  
-  // Si le mode dégradé est actif, désactiver les électroaimants
+
+  // Réactivation automatique des électroaimants après un certain temps
+  if (!electromagnetActive1 && millis() - unlockTime1 >= unlockDuration) {
+    electromagnetActive1 = true;
+    Serial.println("Électroaimant 1 refermé.");
+  }
+  if (!electromagnetActive2 && millis() - unlockTime2 >= unlockDuration) {
+    electromagnetActive2 = true;
+    Serial.println("Électroaimant 2 refermé.");
+  }
+
+  if (!degradedModeActive) {
+    updateDisplay("ENSTO");
+  }
+
+  // Gestion du mode dégradé
   if (degradedModeActive) {
     electromagnetActive1 = false;
     electromagnetActive2 = false;
-    analogWrite(electromagnetPin1, 0);  // Éteindre le premier électroaimant
-    analogWrite(electromagnetPin2, 0);  // Éteindre le deuxième électroaimant
+    analogWrite(electromagnetPin1, 0);
+    analogWrite(electromagnetPin2, 0);
+  } else {
+    analogWrite(electromagnetPin1, electromagnetActive1 ? 255 : 0);
+    analogWrite(electromagnetPin2, electromagnetActive2 ? 255 : 0);
   }
-  
-  // Si le premier électroaimant est activé, envoyer un signal PWM
-  else if (electromagnetActive1) {
-    analogWrite(electromagnetPin1, 255);  // Valeur PWM pour la puissance maximale du premier électroaimant
-  }
-  
-  // Si le deuxième électroaimant est activé, envoyer un signal PWM
-  if (electromagnetActive2) {
-    analogWrite(electromagnetPin2, 255);  // Valeur PWM pour la puissance maximale du deuxième électroaimant
-  }
-  
-  // Vérifier si le mode dégradé est actif et que le délai de 30 secondes est écoulé
+
   if (degradedModeActive && (millis() - lastDegradedTime >= degradedModeTimeout)) {
-    // Si 30 secondes sont passées, réactiver les électroaimants
-    degradedModeActive = false;  // Désactiver le mode dégradé
-    electromagnetActive1 = true;  // Réactiver le premier électroaimant
-    electromagnetActive2 = true;  // Réactiver le deuxième électroaimant
+    degradedModeActive = false;
+    electromagnetActive1 = true;
+    electromagnetActive2 = true;
     Serial.println("Mode dégradé expiré. Les électroaimants sont réactivés.");
   }
+
+  updateLED();
 }
 
-// Fonction pour désactiver le premier électroaimant pendant 3 secondes
-void deactivateElectromagnet1() {
-  electromagnetActive1 = false;  // Désactiver le premier électroaimant
-  analogWrite(electromagnetPin1, 0);  // Éteindre le premier électroaimant (PWM à 0)
-
-  // Attendre 3 secondes (3000 ms)
-  delay(3000);
-
-  electromagnetActive1 = true;  // Réactiver le premier électroaimant
+void unlockElectromagnet1() {
+  electromagnetActive1 = false;
+  unlockTime1 = millis();
+  analogWrite(electromagnetPin1, 0);
 }
 
-// Fonction pour désactiver le deuxième électroaimant pendant 3 secondes
-void deactivateElectromagnet2() {
-  electromagnetActive2 = false;  // Désactiver le deuxième électroaimant
-  analogWrite(electromagnetPin2, 0);  // Éteindre le deuxième électroaimant (PWM à 0)
-
-  // Attendre 3 secondes (3000 ms)
-  delay(3000);
-
-  electromagnetActive2 = true;  // Réactiver le deuxième électroaimant
+void unlockElectromagnet2() {
+  electromagnetActive2 = false;
+  unlockTime2 = millis();
+  analogWrite(electromagnetPin2, 0);
 }
 
-// Fonction pour activer/désactiver le mode dégradé
 void toggleDegradedMode() {
   if (degradedModeActive) {
-    // Si le mode dégradé est déjà actif, désactiver
     degradedModeActive = false;
-    electromagnetActive1 = true;  // Réactiver le premier électroaimant
-    electromagnetActive2 = true;  // Réactiver le deuxième électroaimant
-    Serial.println("Mode dégradé désactivé. Les électroaimants sont réactivés.");
+    electromagnetActive1 = true;
+    electromagnetActive2 = true;
+    Serial.println("Mode degrade desactive.");
+    updateDisplay("Mode degrade desactive.");
   } else {
-    // Si le mode dégradé n'est pas actif, l'activer
     degradedModeActive = true;
-    electromagnetActive1 = false;  // Désactiver le premier électroaimant
-    electromagnetActive2 = false;  // Désactiver le deuxième électroaimant
-    lastDegradedTime = millis();  // Enregistrer le moment où le mode dégradé a été activé
-    Serial.println("Mode dégradé activé. Les électroaimants sont désactivés.");
+    electromagnetActive1 = false;
+    electromagnetActive2 = false;
+    lastDegradedTime = millis();
+    Serial.println("Mode degrade active.");
+    updateDisplay("Mode degrade active.");
   }
+  updateLED();
+}
+
+void updateLED() {
+  static unsigned long lastBlinkTime = 0;
+  static bool ledState1 = false;
+  static bool ledState2 = false;
+  
+  if (degradedModeActive) {
+    unsigned long timeLeft = degradedModeTimeout - (millis() - lastDegradedTime);
+    unsigned long blinkInterval = (timeLeft <= 5000) ? 200 : 1000;
+
+    if (millis() - lastBlinkTime >= blinkInterval) {
+      lastBlinkTime = millis();
+      ledState1 = !ledState1;
+      ledState2 = !ledState2;
+
+      digitalWrite(ledPin1, ledState1 ? HIGH : LOW);
+      digitalWrite(ledPin2, ledState2 ? HIGH : LOW);
+    }
+  } else {
+    digitalWrite(ledPin1, electromagnetActive1 ? LOW : HIGH);
+    digitalWrite(ledPin2, electromagnetActive2 ? LOW : HIGH);
+  }
+}
+
+void updateDisplay(String text) {
+  display.clearDisplay();
+  delay(2000);  // Petit délai pour éviter les bugs d'affichage
+
+  display.setCursor(0, 0);
+  display.print(text);
+  display.display();
 }
